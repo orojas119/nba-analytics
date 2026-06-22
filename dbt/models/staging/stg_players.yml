@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: stg_players
+    description: Cleaned player statistics with per-game calculations
+    columns:
+      - name: player_id
+        description: Unique player identifier
+        tests:
+          - unique
+          - not_null
+      - name: player_name
+        description: Player name
+        tests:
+          - not_null
+      - name: games_played
+        description: Games played this season
+        tests:
+          - not_null
+      - name: points_per_game
+        description: Points per game (calculated)
+        tests:
+          - not_null

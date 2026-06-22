@@ -1,0 +1,8 @@
+nba_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: /Users/orojas/projects/nba-analytics/nba_analytics.duckdb
+      schema: raw
+      threads: 1

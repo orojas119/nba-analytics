@@ -1,0 +1,17 @@
+version: 2
+
+sources:
+  - name: nba
+    description: NBA Stats API data
+    schema: raw
+    tables:
+      - name: player_stats_raw
+        description: Raw player stats from NBA API
+        columns:
+          - name: player_id
+            description: Unique player identifier
+            tests:
+              - unique
+              - not_null
+          - name: player_name
+            description: Player name
