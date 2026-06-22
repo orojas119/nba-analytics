@@ -1,0 +1,10 @@
+__pycache__
+.git
+.gitignore
+node_modules
+venv
+.env
+.vscode
+dbt/target
+dbt/logs
+*.pyc
