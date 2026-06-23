@@ -1,5 +1,5 @@
 nba-api==1.4.1
-pandas==2.2.0
+pandas==2.1.4
 dbt-core==1.7.1
 dbt-duckdb==1.7.1
 python-dotenv==1.0.0
