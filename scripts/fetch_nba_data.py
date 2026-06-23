@@ -1,5 +1,5 @@
 """
-Fetch 2024-25 NBA player stats from stats.nba.com.
+Fetch 2025-26 NBA player stats from stats.nba.com.
 Falls back to a built-in sample dataset when the API is unreachable
 (stats.nba.com blocks non-browser clients on many networks).
 """
@@ -8,7 +8,7 @@ import sys
 import time
 import pandas as pd
 
-SEASON = "2024-25"
+SEASON = "2025-26"
 COLUMNS = ["PLAYER_ID", "PLAYER_NAME", "TEAM_ABBREVIATION", "GP", "PTS", "AST", "REB", "FG_PCT", "FT_PCT"]
 OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "player_stats_raw.csv")
 
@@ -28,7 +28,7 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-# Realistic 2024-25 season totals — all player_ids are unique
+# Realistic 2025-26 season totals — all player_ids are unique
 # (GP, PTS, AST, REB are season totals, not per-game)
 SAMPLE_DATA = [
     (1629029, "Shai Gilgeous-Alexander", "OKC", 75, 2453, 480, 413, 0.534, 0.873),

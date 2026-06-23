@@ -90,7 +90,7 @@ app.layout = html.Div([
                 "verticalAlign": "middle",
             }),
         ]),
-        html.P("2024-25 Season · powered by dbt + DuckDB + Plotly Dash", style={
+        html.P("2025-26 Season · powered by dbt + DuckDB + Plotly Dash", style={
             "margin": "6px 0 0", "fontSize": "0.875rem", "color": "#6B7280",
         }),
     ], style={
@@ -128,7 +128,7 @@ app.layout = html.Div([
     html.Div([
         html.P("Built with dbt · DuckDB · Plotly Dash",
                style={"margin": "0", "fontSize": "0.78rem", "color": "#9CA3AF"}),
-        html.P("Data: NBA Stats API  |  2024-25 Regular Season",
+        html.P("Data: NBA Stats API  |  2025-26 Regular Season",
                style={"margin": "4px 0 0", "fontSize": "0.78rem", "color": "#9CA3AF"}),
     ], style={
         "textAlign": "center",
