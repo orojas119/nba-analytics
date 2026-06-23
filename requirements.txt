@@ -1,8 +1,10 @@
-nba-api==1.4.1
+duckdb==0.10.3
+requests==2.31.0
 pandas==2.1.4
-dbt-core==1.7.1
-dbt-duckdb==1.7.1
 python-dotenv==1.0.0
 plotly==5.24.0
 dash==2.14.2
 gunicorn==23.0.0
+dbt-core==1.7.1
+dbt-duckdb==1.7.1
+protobuf==4.25.9
