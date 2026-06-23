@@ -1,40 +1,34 @@
 """
-Fetch 2025-26 NBA player stats from stats.nba.com.
-Falls back to a built-in sample dataset when the API is unreachable
-(stats.nba.com blocks non-browser clients on many networks).
+Fetch 2025-26 NBA player stats via Tank01 Fantasy Stats (RapidAPI).
+One call to /getNBATeams with rosters=true pulls all 30 teams + every
+player's per-game averages in a single response.
+
+Requires RAPIDAPI_KEY in .env or environment.
+Falls back to built-in sample data when the key is absent or the request fails.
+
+Schema note: dbt staging model expects pts/ast/reb as season TOTALS and
+divides by gp to produce per-game columns, so we multiply the per-game
+averages returned by the API by gamesPlayed before writing to CSV.
 """
 import os
 import sys
-import time
+
 import pandas as pd
+import requests
+from dotenv import load_dotenv
 
-SEASON = "2025-26"
-COLUMNS = ["PLAYER_ID", "PLAYER_NAME", "TEAM_ABBREVIATION", "GP", "PTS", "AST", "REB", "FG_PCT", "FT_PCT"]
-OUTPUT_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "player_stats_raw.csv")
+load_dotenv()
 
-# stats.nba.com requires browser-like headers
-HEADERS = {
-    "Host": "stats.nba.com",
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.5",
-    "x-nba-stats-origin": "stats",
-    "x-nba-stats-token": "true",
-    "Referer": "https://stats.nba.com/",
-    "Connection": "keep-alive",
-}
+RAPIDAPI_KEY  = os.getenv("RAPIDAPI_KEY")
+RAPIDAPI_HOST = "tank01-fantasy-stats.p.rapidapi.com"
+SEASON        = "2025"   # Tank01 uses start year: 2025 → 2025-26 season
+OUTPUT_PATH   = os.path.join(os.path.dirname(__file__), "..", "data", "player_stats_raw.csv")
 
-# Realistic 2025-26 season totals — all player_ids are unique
-# (GP, PTS, AST, REB are season totals, not per-game)
 SAMPLE_DATA = [
     (1629029, "Shai Gilgeous-Alexander", "OKC", 75, 2453, 480, 413, 0.534, 0.873),
-    (203999,  "Nikola Jokic",            "DEN", 79, 2338, 806, 1027, 0.582, 0.831),
+    (203999,  "Nikola Jokic",            "DEN", 65, 1800, 695, 838, 0.569, 0.831),
     (203507,  "Giannis Antetokounmpo",   "MIL", 73, 2219, 445, 869, 0.612, 0.654),
-    (1629627, "Luka Doncic",             "LAL", 56, 1607, 448, 487, 0.457, 0.766),
+    (1629627, "Luka Doncic",             "LAL", 60, 1722, 480, 522, 0.457, 0.766),
     (1630162, "Anthony Edwards",         "MIN", 79, 2204, 434, 427, 0.465, 0.834),
     (201142,  "Kevin Durant",            "PHX", 64, 1722, 275, 448, 0.530, 0.820),
     (201939,  "Stephen Curry",           "GSW", 74, 1820, 429, 333, 0.453, 0.923),
@@ -54,16 +48,15 @@ SAMPLE_DATA = [
     (1631098, "Alperen Sengun",          "HOU", 80, 1688, 448, 752, 0.550, 0.724),
     (1630530, "Evan Mobley",             "CLE", 72, 1339, 223, 699, 0.549, 0.726),
     (1630054, "Scottie Barnes",          "TOR", 70, 1393, 427, 574, 0.489, 0.730),
-    (2544,    "LeBron James",            "LAL", 71, 1683, 589, 568, 0.524, 0.773),
+    (2544,    "LeBron James",            "LAL", 65, 1528, 455, 520, 0.524, 0.773),
     (1629138, "Lauri Markkanen",         "UTA", 78, 1849, 179, 640, 0.497, 0.857),
     (1627742, "Brandon Ingram",          "NOP", 58, 1340, 331, 313, 0.473, 0.793),
     (203120,  "Andre Drummond",          "CHI", 60,  636,  96, 648, 0.560, 0.541),
     (203500,  "Pascal Siakam",           "IND", 80, 1704, 304, 640, 0.481, 0.775),
-    (202710,  "Jimmy Butler",            "MIA", 55, 1001, 286, 336, 0.432, 0.803),
+    (202710,  "Jimmy Butler",            "GSW", 55, 1001, 286, 336, 0.432, 0.803),
     (1628389, "Bam Adebayo",             "MIA", 72, 1469, 274, 749, 0.533, 0.777),
     (1628967, "Saddiq Bey",              "ATL", 65,  780, 130, 416, 0.441, 0.792),
     (202331,  "Paul George",             "PHI", 58, 1050, 244, 302, 0.435, 0.863),
-    (201566,  "Russell Westbrook",       "DEN", 51,  561, 399, 255, 0.413, 0.703),
     (203468,  "Tyler Herro",             "MIA", 74, 1524, 340, 296, 0.455, 0.861),
     (1630178, "Franz Wagner",            "ORL", 79, 1697, 333, 498, 0.479, 0.823),
     (1630547, "Paolo Banchero",          "ORL", 67, 1611, 301, 502, 0.456, 0.741),
@@ -71,39 +64,96 @@ SAMPLE_DATA = [
     (1630586, "Jabari Smith Jr.",        "HOU", 72,  864, 115, 504, 0.426, 0.775),
     (1628973, "Mikal Bridges",           "NYK", 76, 1201, 243, 319, 0.437, 0.746),
     (1628368, "De'Aaron Fox",            "SAC", 72, 1692, 518, 288, 0.479, 0.741),
+    (1641705, "Cooper Flagg",            "DAL", 70, 1540, 350, 490, 0.471, 0.821),
 ]
 
 
 def try_api_fetch():
+    if not RAPIDAPI_KEY or RAPIDAPI_KEY == "your_key_here":
+        print("RAPIDAPI_KEY not set — add it to .env", file=sys.stderr)
+        return None
+
     try:
-        from nba_api.stats.endpoints import LeagueDashPlayerStats
-        print("Attempting live API fetch...")
-        time.sleep(1)
-        endpoint = LeagueDashPlayerStats(season=SEASON, timeout=15, headers=HEADERS)
-        df = endpoint.get_data_frames()[0]
-        df = df[COLUMNS].copy()
-        df.columns = [c.lower() for c in df.columns]
+        print("Fetching 2025-26 NBA rosters + stats from Tank01...")
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST}/getNBATeams",
+            headers={
+                "X-RapidAPI-Key":  RAPIDAPI_KEY,
+                "X-RapidAPI-Host": RAPIDAPI_HOST,
+            },
+            params={
+                "rosters":     "true",
+                "statsToGet":  "averages",
+                "season":      SEASON,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        teams = resp.json().get("body", [])
+
+        rows = []
+        seen_ids = set()
+
+        for team in teams:
+            team_abv = team.get("teamAbv", "")
+            roster   = team.get("Roster", {})
+
+            for player in roster.values():
+                # Use nbaComID as the canonical player_id
+                raw_id = player.get("nbaComID") or player.get("playerID", "")
+                if not raw_id or raw_id in seen_ids:
+                    continue
+
+                stats = player.get("stats") or {}
+                gp    = int(stats.get("gamesPlayed") or 0)
+                if gp == 0:
+                    continue
+
+                ppg = float(stats.get("pts")  or 0)
+                apg = float(stats.get("ast")  or 0)
+                rpg = float(stats.get("reb")  or 0)
+                fgp = float(stats.get("fgp")  or 0) / 100   # 56.9 → 0.569
+                ftp = float(stats.get("ftp")  or 0) / 100   # 83.1 → 0.831
+
+                seen_ids.add(raw_id)
+                rows.append({
+                    "player_id":         int(raw_id),
+                    "player_name":       player.get("longName") or player.get("espnName", ""),
+                    "team_abbreviation": team_abv,
+                    "gp":                gp,
+                    "pts":               round(ppg * gp),   # totals for dbt schema
+                    "ast":               round(apg * gp),
+                    "reb":               round(rpg * gp),
+                    "fg_pct":            round(fgp, 3),
+                    "ft_pct":            round(ftp, 3),
+                })
+
+        df = pd.DataFrame(rows)
+        print(f"Fetched {len(df)} players across {len(teams)} teams.")
         return df
+
     except Exception as e:
-        print(f"API unavailable ({type(e).__name__}), using sample data.", file=sys.stderr)
+        print(f"Tank01 error ({type(e).__name__}: {e}), using sample data.", file=sys.stderr)
         return None
 
 
 def make_sample_df():
-    cols = ["player_id", "player_name", "team_abbreviation", "gp", "pts", "ast", "reb", "fg_pct", "ft_pct"]
+    cols = ["player_id", "player_name", "team_abbreviation",
+            "gp", "pts", "ast", "reb", "fg_pct", "ft_pct"]
     return pd.DataFrame(SAMPLE_DATA, columns=cols)
 
 
 def main():
-    df = try_api_fetch() or make_sample_df()
+    df = try_api_fetch()
+    if df is None:
+        df = make_sample_df()
 
     out = os.path.abspath(OUTPUT_PATH)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     df.to_csv(out, index=False)
 
-    source = "live API" if len(df) > len(SAMPLE_DATA) else "sample data"
-    print(f"Fetched {len(df)} records ({source})")
-    print(f"Saved to {out}")
+    source = "Tank01 API" if len(df) != len(SAMPLE_DATA) else "sample data"
+    print(f"Saved {len(df)} records ({source}) → {out}")
 
 
 if __name__ == "__main__":
