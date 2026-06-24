@@ -13,9 +13,10 @@ load_dotenv()
 RAPIDAPI_KEY  = os.getenv("RAPIDAPI_KEY")
 RAPIDAPI_HOST = "tank01-fantasy-stats.p.rapidapi.com"
 
-# Fallback sample data — columns match _fetch_from_api() output
-# (player_id, player_name, team, gp, ppg, apg, rpg, fg_pct, ft_pct, pos, age, mpg)
-# plus_minus is always 0.0 (not available from Tank01)
+PORTFOLIO_URL = (
+    "https://oscarrojas-portfolio-e1imgiphw-orojas119s-projects.vercel.app"
+)
+
 SAMPLE_DATA = [
     (1629029, "Shai Gilgeous-Alexander", "OKC", 68, 33.5, 6.6, 4.3, 0.534, 0.873, "SG", 27, 36.0),
     (203999,  "Nikola Jokic",            "DEN", 65, 27.7, 10.7, 12.9, 0.569, 0.831, "C",  31, 34.5),
@@ -43,7 +44,6 @@ SAMPLE_DATA = [
 # ── Data loading ──────────────────────────────────────────────────────────────
 
 def _calc_age(bday_str: str) -> int:
-    """Parse Tank01 bDay format '7/20/1999' into current age."""
     if not bday_str:
         return 0
     try:
@@ -58,7 +58,6 @@ def _calc_age(bday_str: str) -> int:
 
 
 def _fetch_from_api():
-    """Pull all 30 team rosters + per-game stats in one Tank01 call."""
     if not RAPIDAPI_KEY:
         return None
     try:
@@ -71,7 +70,6 @@ def _fetch_from_api():
         )
         resp.raise_for_status()
         teams = resp.json().get("body", [])
-
         rows, seen = [], set()
         for team in teams:
             for player in team.get("Roster", {}).values():
@@ -99,10 +97,8 @@ def _fetch_from_api():
                     # TODO: plus_minus not available from Tank01 per-game averages
                     "plus_minus":        0.0,
                 })
-
         print(f"Loaded {len(rows)} players from Tank01.")
         return pd.DataFrame(rows)
-
     except Exception as e:
         print(f"Tank01 error: {e} — falling back to sample data.")
         return None
@@ -119,24 +115,27 @@ def _make_sample_df() -> pd.DataFrame:
     return df
 
 
-# Load once at startup — in-memory DuckDB, no file path required.
 _df = _fetch_from_api()
 if _df is None:
     _df = _make_sample_df()
 
-# Team list populated from live data for the team dropdown.
 _teams = sorted(_df["team_abbreviation"].dropna().unique().tolist())
+_team_options = (
+    [{"label": "All Teams", "value": "All Teams"}] +
+    [{"label": t, "value": t} for t in _teams]
+)
+_gp_max = int(_df["games_played"].max())
 
 
 # ── Query helpers ─────────────────────────────────────────────────────────────
 
-def _build_where(mpg, positions, age_range, team) -> str:
+def _build_where(mpg, positions, age_range, team, gp_range=None) -> str:
     conditions = []
 
     if mpg is not None:
         conditions.append(f"min_per_game >= {float(mpg)}")
 
-    if positions:  # None or empty list → no position filter
+    if positions:
         quoted = ", ".join(f"'{p}'" for p in positions)
         conditions.append(f"position IN ({quoted})")
 
@@ -149,6 +148,9 @@ def _build_where(mpg, positions, age_range, team) -> str:
 
     if team and team != "All Teams":
         conditions.append(f"team_abbreviation = '{team}'")
+
+    if gp_range and len(gp_range) == 2:
+        conditions.append(f"games_played BETWEEN {gp_range[0]} AND {gp_range[1]}")
 
     return ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
@@ -215,11 +217,7 @@ def get_leaderboard(where: str = "") -> pd.DataFrame:
     """)
 
 
-# ── App setup ─────────────────────────────────────────────────────────────────
-
-app = Dash(__name__)
-app.title = "NBA Analytics Dashboard"
-server = app.server  # expose for gunicorn
+# ── Styles & constants ────────────────────────────────────────────────────────
 
 FONT = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
 CARD = {
@@ -241,7 +239,6 @@ CHART_LAYOUT = dict(
     hoverlabel=dict(bgcolor="#1F2937", font_color="#F9FAFB",
                     font_family=FONT, bordercolor="#1F2937"),
 )
-
 LEADERBOARD_COLS = [
     {"name": "#",            "id": "rank",         "type": "numeric"},
     {"name": "Player",       "id": "player_name"},
@@ -253,6 +250,8 @@ LEADERBOARD_COLS = [
     {"name": "Impact Score", "id": "impact_score", "type": "numeric"},
 ]
 
+
+# ── Layout helpers ────────────────────────────────────────────────────────────
 
 def kpi_card(label: str, value: str, accent: str = "#111827") -> html.Div:
     return html.Div([
@@ -267,178 +266,478 @@ def kpi_card(label: str, value: str, accent: str = "#111827") -> html.Div:
     ], style=CARD)
 
 
-def _filter_item(label: str, component) -> html.Div:
+def _filter_item(label: str, component, flex: str = "1") -> html.Div:
     return html.Div([
         html.Label(label, style=LABEL_STYLE),
         component,
-    ], style={"flex": "1", "minWidth": "140px"})
+    ], style={"flex": flex, "minWidth": "130px"})
 
 
-# ── Layout ───────────────────────────────────────────────────────────────────
+# ── Dashboard layout ──────────────────────────────────────────────────────────
+
+def _dashboard_layout() -> html.Div:
+    return html.Div([
+
+        # Header
+        html.Div([
+            html.Div([
+                html.Span("🏀", style={"fontSize": "2rem", "marginRight": "12px",
+                                        "verticalAlign": "middle"}),
+                html.Span("NBA Analytics Dashboard", style={
+                    "fontSize": "1.75rem", "fontWeight": "800", "color": "#111827",
+                    "verticalAlign": "middle",
+                }),
+            ]),
+            html.P("2025-26 Season · powered by dbt + DuckDB + Plotly Dash", style={
+                "margin": "6px 0 0", "fontSize": "0.875rem", "color": "#6B7280",
+            }),
+        ], style={"padding": "2rem 3rem", "background": "#ffffff",
+                  "borderBottom": "1px solid #E5E7EB"}),
+
+        # KPI row
+        html.Div(id="kpi-row", style={
+            "display": "grid", "gridTemplateColumns": "repeat(4, 1fr)",
+            "gap": "1.5rem", "padding": "2rem 3rem 0",
+        }),
+
+        # Filter bar
+        html.Div([
+            _filter_item("Min / Game", dcc.Dropdown(
+                id="filter-mpg",
+                options=[{"label": f"{v}+ min", "value": v}
+                         for v in [5, 10, 15, 20, 25, 30, 35]],
+                value=15,
+                clearable=False,
+            )),
+            _filter_item("Position", dcc.Dropdown(
+                id="filter-position",
+                options=[{"label": p, "value": p} for p in ["PG", "SG", "SF", "PF", "C"]],
+                value=None,
+                multi=True,
+                placeholder="All Positions",
+            )),
+            _filter_item("Age Group", dcc.Dropdown(
+                id="filter-age",
+                options=[
+                    {"label": "All Ages", "value": "All Ages"},
+                    {"label": "18–24",    "value": "18-24"},
+                    {"label": "25–28",    "value": "25-28"},
+                    {"label": "29–32",    "value": "29-32"},
+                    {"label": "33–36",    "value": "33-36"},
+                    {"label": "37+",      "value": "37+"},
+                ],
+                value="All Ages",
+                clearable=False,
+            )),
+            _filter_item("Team", dcc.Dropdown(
+                id="filter-team",
+                options=_team_options,
+                value="All Teams",
+                clearable=False,
+            )),
+            # GP slider gets more width since sliders need horizontal room
+            _filter_item("Games Played", html.Div([
+                dcc.RangeSlider(
+                    id="filter-gp",
+                    min=1,
+                    max=82,
+                    step=1,
+                    value=[20, 82],
+                    marks={1: "1", 10: "10", 20: "20", 40: "40", 60: "60", 82: "82"},
+                    tooltip={"placement": "bottom", "always_visible": False},
+                ),
+            ], style={"paddingTop": "4px"}), flex="2"),
+        ], style={
+            "display": "flex", "gap": "1.5rem", "alignItems": "flex-start",
+            "flexWrap": "wrap",
+            "background": "#F3F4F6", "padding": "1.25rem 3rem",
+            "borderTop": "1px solid #E5E7EB", "borderBottom": "1px solid #E5E7EB",
+            "marginTop": "1.5rem",
+        }),
+
+        # Charts row
+        html.Div([
+            html.Div(dcc.Graph(id="top-scorers-chart",
+                               config={"displayModeBar": False}),
+                     style={**CARD, "padding": "1.25rem"}),
+            html.Div(dcc.Graph(id="team-efficiency-chart",
+                               config={"displayModeBar": False}),
+                     style={**CARD, "padding": "1.25rem"}),
+        ], style={"display": "grid", "gridTemplateColumns": "1fr 1fr",
+                  "gap": "1.5rem", "padding": "1.5rem 3rem"}),
+
+        # Impact Score leaderboard
+        html.Div([
+            html.Div([
+                html.H3("Top 10 Players — Impact Score", style={
+                    "margin": "0 0 1rem", "fontSize": "0.95rem", "fontWeight": "700",
+                    "color": "#111827",
+                }),
+                dash_table.DataTable(
+                    id="leaderboard-table",
+                    columns=LEADERBOARD_COLS,
+                    data=[],
+                    sort_action="native",
+                    style_as_list_view=True,
+                    style_table={"borderRadius": "8px", "overflow": "hidden"},
+                    style_header={
+                        "backgroundColor": "#1F2937", "color": "#F9FAFB",
+                        "fontWeight": "700", "fontSize": "0.72rem",
+                        "textTransform": "uppercase", "letterSpacing": "0.06em",
+                        "padding": "12px 16px", "border": "none",
+                    },
+                    style_cell={
+                        "fontFamily": FONT, "fontSize": "0.875rem",
+                        "padding": "10px 16px", "textAlign": "left",
+                        "border": "none", "borderBottom": "1px solid #F3F4F6",
+                        "color": "#374151",
+                    },
+                    style_cell_conditional=[
+                        {"if": {"column_id": c}, "textAlign": "center"}
+                        for c in ["rank", "ppg", "apg", "rpg", "plus_minus", "impact_score"]
+                    ],
+                    style_data_conditional=[
+                        {"if": {"row_index": "odd"}, "backgroundColor": "#F9FAFB"},
+                        {"if": {"row_index": 0},
+                         "backgroundColor": "#FFFBEB", "borderLeft": "4px solid #F59E0B"},
+                        {"if": {"column_id": "impact_score"},
+                         "color": "#1D4ED8", "fontWeight": "700"},
+                    ],
+                    page_action="none",
+                ),
+                html.P(
+                    "Impact Score = PPG × 0.4 + APG × 0.3 + RPG × 0.2 + +/- × 0.1  "
+                    "· +/- shown as 0.0 (not available from Tank01 per-game data)",
+                    style={"margin": "12px 0 0", "fontSize": "0.72rem",
+                           "color": "#9CA3AF", "fontStyle": "italic"},
+                ),
+            ], style={**CARD, "padding": "1.5rem"}),
+        ], style={"padding": "0 3rem 1.5rem"}),
+
+        # Footer
+        html.Div([
+            html.P("Built with dbt · DuckDB · Plotly Dash",
+                   style={"margin": "0", "fontSize": "0.78rem", "color": "#9CA3AF"}),
+            html.P("Data: Tank01 / NBA Stats API  |  2025-26 Regular Season",
+                   style={"margin": "4px 0 0", "fontSize": "0.78rem", "color": "#9CA3AF"}),
+            html.P([
+                html.A("About this project", href="/about",
+                       style={"color": "#9CA3AF", "textDecoration": "none"}),
+                "  ·  Built by  ",
+                html.A("Oscar Rojas", href=PORTFOLIO_URL, target="_blank",
+                       style={"color": "#9CA3AF", "textDecoration": "none"}),
+            ], style={"margin": "8px 0 0", "fontSize": "0.75rem", "color": "#9CA3AF"}),
+        ], style={"textAlign": "center", "padding": "2rem 3rem",
+                  "background": "#F9FAFB", "borderTop": "1px solid #E5E7EB"}),
+
+        dcc.Store(id="init"),
+
+    ], style={"minHeight": "100vh", "background": "#F9FAFB"})
+
+
+# ── About page layout ─────────────────────────────────────────────────────────
+
+def _arch_box(title: str, subtitle: str, bg: str, border: str) -> html.Div:
+    return html.Div([
+        html.Div(title, style={
+            "fontWeight": "700", "fontSize": "0.78rem", "color": border,
+        }),
+        html.Div(subtitle, style={
+            "fontSize": "0.62rem", "color": "#6B7280", "marginTop": "3px",
+        }),
+    ], style={
+        "background": bg, "border": f"1px solid {border}",
+        "borderRadius": "8px", "padding": "10px 14px",
+        "textAlign": "center", "flex": "1", "minWidth": "80px",
+    })
+
+
+def _etl_card(icon: str, title: str, body: str) -> html.Div:
+    return html.Div([
+        html.Div(icon, style={"fontSize": "1.75rem", "marginBottom": "0.75rem"}),
+        html.H3(title, style={
+            "margin": "0 0 0.75rem", "fontSize": "1rem",
+            "fontWeight": "700", "color": "#1a2e4a",
+        }),
+        html.P(body, style={
+            "margin": "0", "fontSize": "0.875rem",
+            "color": "#4B5563", "lineHeight": "1.6",
+        }),
+    ], style={**CARD, "textAlign": "center", "padding": "1.75rem 1.5rem"})
+
+
+def _section_heading(text: str) -> html.H2:
+    return html.H2(text, style={
+        "margin": "2.5rem 0 1rem", "fontSize": "1.25rem",
+        "fontWeight": "800", "color": "#1a2e4a",
+        "borderBottom": "2px solid #E5E7EB", "paddingBottom": "0.5rem",
+    })
+
+
+def _about_layout() -> html.Div:
+    arrow = html.Span("→", style={
+        "color": "#9CA3AF", "fontSize": "1.1rem",
+        "alignSelf": "center", "flexShrink": "0",
+    })
+
+    arch_diagram = html.Div([
+        _arch_box("NBA Stats API",  "Tank01 / RapidAPI",    "#DBEAFE", "#3B82F6"),
+        arrow,
+        _arch_box("Python Fetch",   "fetch_nba_data.py",    "#D1FAE5", "#10B981"),
+        arrow,
+        _arch_box("Raw CSV",        "dbt seeds/",           "#FEF3C7", "#F59E0B"),
+        arrow,
+        _arch_box("dbt Models",     "stg_players",          "#EDE9FE", "#8B5CF6"),
+        arrow,
+        _arch_box("DuckDB",         "In-memory analytics",  "#FCE7F3", "#EC4899"),
+        arrow,
+        _arch_box("Plotly Dash",    "app.py",               "#DBEAFE", "#1D4ED8"),
+        arrow,
+        _arch_box("Render",         "Live web app",         "#D1FAE5", "#059669"),
+    ], style={
+        "display": "flex", "alignItems": "stretch", "gap": "6px",
+        "flexWrap": "wrap", "padding": "1.5rem",
+        "background": "#F9FAFB", "borderRadius": "12px",
+        "border": "1px solid #E5E7EB",
+    })
+
+    tech_pill_style = {
+        "display": "inline-block",
+        "background": "#EEF2FF", "color": "#3730A3",
+        "borderRadius": "999px", "padding": "4px 14px",
+        "fontSize": "0.8rem", "fontWeight": "600",
+        "margin": "4px",
+    }
+
+    btn_primary = {
+        "background": "#111827", "color": "#ffffff",
+        "padding": "12px 24px", "borderRadius": "8px",
+        "textDecoration": "none", "fontWeight": "600",
+        "fontSize": "0.875rem", "display": "inline-block",
+    }
+    btn_secondary = {
+        "background": "#ffffff", "color": "#111827",
+        "padding": "12px 24px", "borderRadius": "8px",
+        "textDecoration": "none", "fontWeight": "600",
+        "fontSize": "0.875rem", "border": "1px solid #E5E7EB",
+        "display": "inline-block",
+    }
+
+    return html.Div([
+
+        # Back link
+        html.Div(
+            html.A("← Back to Dashboard", href="/", style={
+                "color": "#6B7280", "textDecoration": "none",
+                "fontSize": "0.875rem", "fontWeight": "600",
+            }),
+            style={"marginBottom": "2rem"},
+        ),
+
+        # Page title
+        html.Div([
+            html.H1("NBA Analytics Pipeline", style={
+                "margin": "0", "fontSize": "2rem",
+                "fontWeight": "800", "color": "#111827",
+            }),
+            html.P("Technical Architecture & Implementation", style={
+                "margin": "6px 0 0", "fontSize": "1rem", "color": "#6B7280",
+            }),
+        ], style={
+            "paddingBottom": "1.5rem",
+            "borderBottom": "2px solid #E5E7EB",
+        }),
+
+        # Section 1 — Overview
+        _section_heading("Overview"),
+        html.P(
+            "This NBA Analytics Pipeline is a full end-to-end data engineering project "
+            "built with Python, dbt, DuckDB, and Plotly Dash. It fetches 500+ player "
+            "records from the 2025-26 NBA season via the Tank01 Fantasy Stats API, "
+            "transforms them through a structured dbt pipeline, and serves the results "
+            "as an interactive dashboard deployed on Render.",
+            style={"color": "#374151", "lineHeight": "1.7", "marginBottom": "1rem"},
+        ),
+        html.P(
+            "The project demonstrates a lightweight but production-ready analytics stack: "
+            "raw data flows through dbt's staging layer, business logic lives in "
+            "version-controlled SQL models, and the Plotly Dash app reads directly from "
+            "in-memory DuckDB — no server-side database process required.",
+            style={"color": "#374151", "lineHeight": "1.7", "marginBottom": "1rem"},
+        ),
+        html.P(
+            "Key design goals: zero-dependency deployment (no PostgreSQL, no Redis), "
+            "graceful fallback when the NBA API is unavailable, sub-second dashboard "
+            "loads for a ~500-row dataset, and fully reproducible builds via pinned "
+            "dependencies and a Render auto-deploy pipeline.",
+            style={"color": "#374151", "lineHeight": "1.7", "marginBottom": "1rem"},
+        ),
+        html.Div([
+            html.Span(t, style=tech_pill_style)
+            for t in ["Python", "dbt", "DuckDB", "Plotly Dash", "Render", "GitHub"]
+        ], style={"marginTop": "0.5rem"}),
+
+        # Section 2 — Architecture
+        _section_heading("Architecture — Data Flow"),
+        arch_diagram,
+
+        # Section 3 — ETL cards
+        _section_heading("Data Pipeline"),
+        html.Div([
+            _etl_card(
+                "📥", "Extract",
+                "Python script calls the Tank01 Fantasy Stats API via RapidAPI. "
+                "A single /getNBATeams request with rosters=true returns all 30 teams "
+                "and every player's per-game averages in one response — ~529 player "
+                "records. Handles API unavailability with a graceful fallback to a "
+                "built-in sample dataset so the dashboard always has data.",
+            ),
+            _etl_card(
+                "⚙️", "Transform",
+                "dbt project transforms raw CSV seeds through a staging layer. "
+                "stg_players cleans column names, filters out zero-game players, "
+                "and computes derived metrics: PPG, APG, RPG, and a weighted "
+                "Impact Score. DuckDB runs in-process — no separate database "
+                "server needed. 7+ data quality tests run on every dbt execution.",
+            ),
+            _etl_card(
+                "📊", "Visualize",
+                "Plotly Dash app reads directly from in-memory DuckDB at startup. "
+                "5 interactive filters (minutes, position, age, team, games played), "
+                "2 Plotly charts, 4 KPI cards, and an Impact Score leaderboard — "
+                "all wired to a single callback. Deployed on Render with "
+                "auto-deploy from GitHub main branch.",
+            ),
+        ], style={
+            "display": "grid",
+            "gridTemplateColumns": "repeat(auto-fit, minmax(240px, 1fr))",
+            "gap": "1.5rem",
+        }),
+
+        # Section 4 — Engineering Decisions
+        _section_heading("Key Engineering Decisions"),
+        html.Ol([
+            html.Li([
+                html.Strong("DuckDB over PostgreSQL — "),
+                "Zero-config, in-process, and fast for analytical queries at this "
+                "scale. No connection pooling, no server to manage, deploys as a "
+                "Python package.",
+            ], style={"marginBottom": "0.75rem", "color": "#374151", "lineHeight": "1.6"}),
+            html.Li([
+                html.Strong("dbt for transformations — "),
+                "Version-controlled SQL with clear lineage, built-in testing, and "
+                "readable model definitions. Makes the business logic auditable and "
+                "easy to extend.",
+            ], style={"marginBottom": "0.75rem", "color": "#374151", "lineHeight": "1.6"}),
+            html.Li([
+                html.Strong("Graceful API fallback — "),
+                "stats.nba.com blocks non-browser traffic from cloud IPs. Tank01 "
+                "via RapidAPI solves this, with a built-in sample dataset ensuring "
+                "the dashboard always renders even if the API key is missing.",
+            ], style={"marginBottom": "0.75rem", "color": "#374151", "lineHeight": "1.6"}),
+            html.Li([
+                html.Strong("In-memory DuckDB at startup — "),
+                "Eliminates the file-path dependency that caused Render deployments "
+                "to crash. Data is fetched fresh from the API on every deploy, "
+                "registered into :memory:, and queried per request.",
+            ], style={"marginBottom": "0.75rem", "color": "#374151", "lineHeight": "1.6"}),
+            html.Li([
+                html.Strong("Pinned dependencies — "),
+                "protobuf==4.25.9 and Python 3.11 prevent breakage from upstream "
+                "changes. dbt 1.7 is incompatible with protobuf 5.x.",
+            ], style={"color": "#374151", "lineHeight": "1.6"}),
+        ], style={"paddingLeft": "1.5rem"}),
+
+        # Section 5 — dbt Lineage
+        _section_heading("dbt Model Lineage"),
+        html.Pre(
+            "  raw.player_stats_raw          ← dbt seed (CSV committed to repo)\n"
+            "         ↓\n"
+            "  staging.stg_players           ← cleans columns, filters GP > 0\n"
+            "    · renames: gp→games_played, pts/ast/reb→totals\n"
+            "    · derives: points_per_game, assists_per_game, rebounds_per_game\n"
+            "    · adds:    position, age, min_per_game, impact_score\n"
+            "         ↓\n"
+            "  Dashboard reads directly from staging (in-memory on Render)",
+            style={
+                "background": "#1F2937", "color": "#D1FAE5",
+                "padding": "1.5rem", "borderRadius": "8px",
+                "fontSize": "0.82rem",
+                "fontFamily": "ui-monospace, 'Cascadia Code', 'Source Code Pro', monospace",
+                "overflowX": "auto", "margin": "0", "lineHeight": "1.8",
+                "whiteSpace": "pre",
+            },
+        ),
+
+        # Section 6 — CTAs
+        _section_heading("GitHub & Live Demo"),
+        html.Div([
+            html.A("View Source on GitHub",
+                   href="https://github.com/orojas119/nba-analytics",
+                   target="_blank",
+                   style=btn_primary),
+            html.A("← Back to Dashboard",
+                   href="/",
+                   style=btn_secondary),
+        ], style={"display": "flex", "gap": "1rem", "flexWrap": "wrap",
+                  "marginBottom": "3rem"}),
+
+        # Footer
+        html.Div([
+            html.P([
+                "Built by  ",
+                html.A("Oscar Rojas", href=PORTFOLIO_URL, target="_blank",
+                       style={"color": "#6B7280"}),
+                "  ·  Miami, FL",
+            ], style={"margin": "0", "fontSize": "0.8rem", "color": "#9CA3AF"}),
+        ], style={
+            "borderTop": "1px solid #E5E7EB", "paddingTop": "2rem",
+            "textAlign": "center",
+        }),
+
+    ], style={
+        "maxWidth": "900px", "margin": "0 auto",
+        "padding": "3rem 2rem", "fontFamily": FONT,
+    })
+
+
+# ── App & routing ─────────────────────────────────────────────────────────────
+
+app = Dash(__name__, suppress_callback_exceptions=True)
+app.title = "NBA Analytics Dashboard"
+server = app.server  # expose for gunicorn
 
 app.layout = html.Div([
-
-    # Header
-    html.Div([
-        html.Div([
-            html.Span("🏀", style={"fontSize": "2rem", "marginRight": "12px",
-                                    "verticalAlign": "middle"}),
-            html.Span("NBA Analytics Dashboard", style={
-                "fontSize": "1.75rem", "fontWeight": "800", "color": "#111827",
-                "verticalAlign": "middle",
-            }),
-        ]),
-        html.P("2025-26 Season · powered by dbt + DuckDB + Plotly Dash", style={
-            "margin": "6px 0 0", "fontSize": "0.875rem", "color": "#6B7280",
-        }),
-    ], style={"padding": "2rem 3rem", "background": "#ffffff",
-              "borderBottom": "1px solid #E5E7EB"}),
-
-    # KPI row
-    html.Div(id="kpi-row", style={
-        "display": "grid", "gridTemplateColumns": "repeat(4, 1fr)",
-        "gap": "1.5rem", "padding": "2rem 3rem 0",
-    }),
-
-    # Filter bar
-    html.Div([
-        _filter_item("Min / Game", dcc.Dropdown(
-            id="filter-mpg",
-            options=[{"label": f"{v}+ min", "value": v} for v in [5, 10, 15, 20, 25, 30, 35]],
-            value=15,
-            clearable=False,
-        )),
-        _filter_item("Position", dcc.Dropdown(
-            id="filter-position",
-            options=[{"label": p, "value": p} for p in ["PG", "SG", "SF", "PF", "C"]],
-            value=None,
-            multi=True,
-            placeholder="All Positions",
-        )),
-        _filter_item("Age Group", dcc.Dropdown(
-            id="filter-age",
-            options=[
-                {"label": "All Ages", "value": "All Ages"},
-                {"label": "18–24",    "value": "18-24"},
-                {"label": "25–28",    "value": "25-28"},
-                {"label": "29–32",    "value": "29-32"},
-                {"label": "33–36",    "value": "33-36"},
-                {"label": "37+",      "value": "37+"},
-            ],
-            value="All Ages",
-            clearable=False,
-        )),
-        _filter_item("Team", dcc.Dropdown(
-            id="filter-team",
-            options=(
-                [{"label": "All Teams", "value": "All Teams"}] +
-                [{"label": t, "value": t} for t in _teams]
-            ),
-            value="All Teams",
-            clearable=False,
-        )),
-    ], style={
-        "display": "flex", "gap": "1.5rem", "alignItems": "flex-start",
-        "background": "#F3F4F6", "padding": "1.25rem 3rem",
-        "borderTop": "1px solid #E5E7EB", "borderBottom": "1px solid #E5E7EB",
-        "marginTop": "1.5rem",
-    }),
-
-    # Charts row
-    html.Div([
-        html.Div(dcc.Graph(id="top-scorers-chart",    config={"displayModeBar": False}),
-                 style={**CARD, "padding": "1.25rem"}),
-        html.Div(dcc.Graph(id="team-efficiency-chart", config={"displayModeBar": False}),
-                 style={**CARD, "padding": "1.25rem"}),
-    ], style={"display": "grid", "gridTemplateColumns": "1fr 1fr",
-              "gap": "1.5rem", "padding": "1.5rem 3rem"}),
-
-    # Impact Score leaderboard
-    html.Div([
-        html.Div([
-            html.H3("Top 10 Players — Impact Score", style={
-                "margin": "0 0 1rem", "fontSize": "0.95rem", "fontWeight": "700",
-                "color": "#111827",
-            }),
-            dash_table.DataTable(
-                id="leaderboard-table",
-                columns=LEADERBOARD_COLS,
-                data=[],
-                sort_action="native",
-                style_as_list_view=True,
-                style_table={"borderRadius": "8px", "overflow": "hidden"},
-                style_header={
-                    "backgroundColor": "#1F2937",
-                    "color": "#F9FAFB",
-                    "fontWeight": "700",
-                    "fontSize": "0.72rem",
-                    "textTransform": "uppercase",
-                    "letterSpacing": "0.06em",
-                    "padding": "12px 16px",
-                    "border": "none",
-                },
-                style_cell={
-                    "fontFamily": FONT,
-                    "fontSize": "0.875rem",
-                    "padding": "10px 16px",
-                    "textAlign": "left",
-                    "border": "none",
-                    "borderBottom": "1px solid #F3F4F6",
-                    "color": "#374151",
-                },
-                style_cell_conditional=[
-                    {"if": {"column_id": c}, "textAlign": "center"}
-                    for c in ["rank", "ppg", "apg", "rpg", "plus_minus", "impact_score"]
-                ],
-                style_data_conditional=[
-                    {"if": {"row_index": "odd"},  "backgroundColor": "#F9FAFB"},
-                    {"if": {"row_index": 0},
-                     "backgroundColor": "#FFFBEB", "borderLeft": "4px solid #F59E0B"},
-                    {"if": {"column_id": "impact_score"},
-                     "color": "#1D4ED8", "fontWeight": "700"},
-                ],
-                page_action="none",
-            ),
-            html.P(
-                "Impact Score = PPG × 0.4 + APG × 0.3 + RPG × 0.2 + +/- × 0.1  "
-                "· +/- shown as 0.0 (not available from Tank01 per-game data)",
-                style={"margin": "12px 0 0", "fontSize": "0.72rem", "color": "#9CA3AF",
-                       "fontStyle": "italic"},
-            ),
-        ], style={**CARD, "padding": "1.5rem"}),
-    ], style={"padding": "0 3rem 1.5rem"}),
-
-    # Footer
-    html.Div([
-        html.P("Built with dbt · DuckDB · Plotly Dash",
-               style={"margin": "0", "fontSize": "0.78rem", "color": "#9CA3AF"}),
-        html.P("Data: Tank01 / NBA Stats API  |  2025-26 Regular Season",
-               style={"margin": "4px 0 0", "fontSize": "0.78rem", "color": "#9CA3AF"}),
-    ], style={"textAlign": "center", "padding": "2rem 3rem",
-              "background": "#F9FAFB", "borderTop": "1px solid #E5E7EB"}),
-
-    dcc.Store(id="init"),
-
-], style={"minHeight": "100vh", "background": "#F9FAFB", "fontFamily": FONT})
+    dcc.Location(id="url", refresh=False),
+    html.Div(id="page-content"),
+], style={"fontFamily": FONT, "background": "#F9FAFB", "minHeight": "100vh"})
 
 
-# ── Callback ──────────────────────────────────────────────────────────────────
+@callback(Output("page-content", "children"), Input("url", "pathname"))
+def display_page(pathname):
+    if pathname == "/about":
+        return _about_layout()
+    return _dashboard_layout()
+
+
+# ── Dashboard data callback ───────────────────────────────────────────────────
 
 @callback(
-    Output("kpi-row",              "children"),
-    Output("top-scorers-chart",    "figure"),
-    Output("team-efficiency-chart","figure"),
-    Output("leaderboard-table",    "data"),
+    Output("kpi-row",               "children"),
+    Output("top-scorers-chart",     "figure"),
+    Output("team-efficiency-chart", "figure"),
+    Output("leaderboard-table",     "data"),
     Input("init",            "data"),
     Input("filter-mpg",      "value"),
     Input("filter-position", "value"),
     Input("filter-age",      "value"),
     Input("filter-team",     "value"),
+    Input("filter-gp",       "value"),
 )
-def update_dashboard(_, mpg, positions, age_range, team):
-    where = _build_where(mpg, positions, age_range, team)
+def update_dashboard(_, mpg, positions, age_range, team, gp_range):
+    where = _build_where(mpg, positions, age_range, team, gp_range)
 
-    # ── KPIs ────────────────────────────────────────────────────────────────
+    # KPIs
     s = get_summary(where).iloc[0]
     kpis = [
         kpi_card("Total Players",       str(int(s["total_players"]))),
@@ -447,7 +746,7 @@ def update_dashboard(_, mpg, positions, age_range, team):
         kpi_card("Avg Rebounds / Game", str(s["avg_rpg"]), "#7C3AED"),
     ]
 
-    # ── Top Scorers bar ─────────────────────────────────────────────────────
+    # Top Scorers bar
     top = get_top_scorers(where)
     fig_scorers = px.bar(
         top, x="points_per_game", y="player_name", orientation="h",
@@ -471,7 +770,7 @@ def update_dashboard(_, mpg, positions, age_range, team):
         xaxis_title="Points Per Game",
     )
 
-    # ── Team Efficiency scatter ──────────────────────────────────────────────
+    # Team Efficiency scatter
     eff = get_team_efficiency(where)
     fig_team = px.scatter(
         eff, x="avg_fg_pct", y="avg_team_ppg",
@@ -492,17 +791,14 @@ def update_dashboard(_, mpg, positions, age_range, team):
         ),
     )
     fig_team.update_layout(
-        **CHART_LAYOUT,
-        coloraxis_showscale=False,
-        xaxis_tickformat=".1%",
+        **CHART_LAYOUT, coloraxis_showscale=False, xaxis_tickformat=".1%",
     )
 
-    # ── Leaderboard ─────────────────────────────────────────────────────────
+    # Leaderboard
     lb = get_leaderboard(where).reset_index(drop=True)
     lb.insert(0, "rank", range(1, len(lb) + 1))
-    leaderboard_data = lb.to_dict("records")
 
-    return kpis, fig_scorers, fig_team, leaderboard_data
+    return kpis, fig_scorers, fig_team, lb.to_dict("records")
 
 
 if __name__ == "__main__":
