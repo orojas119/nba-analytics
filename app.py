@@ -587,10 +587,12 @@ def _about_layout() -> html.Div:
         _section_heading("Overview"),
         html.P(
             "This NBA Analytics Pipeline is a full end-to-end data engineering project "
-            "built with Python, dbt, DuckDB, and Plotly Dash. It fetches 500+ player "
-            "records from the 2025-26 NBA season via the Tank01 Fantasy Stats API, "
-            "transforms them through a structured dbt pipeline, and serves the results "
-            "as an interactive dashboard deployed on Render.",
+            "built with Python, dbt, DuckDB, and Plotly Dash. It pulls 500+ player "
+            "records from the 2025-26 NBA season via the Tank01 Fantasy Stats API and "
+            "merges BPM (Box Plus Minus) from Basketball Reference — two complementary "
+            "sources that together cover per-game production and individual impact. "
+            "Data is transformed through a dbt pipeline and served as an interactive "
+            "dashboard deployed on Render.",
             style={"color": "#374151", "lineHeight": "1.7", "marginBottom": "1rem"},
         ),
         html.P(
@@ -609,7 +611,8 @@ def _about_layout() -> html.Div:
         ),
         html.Div([
             html.Span(t, style=tech_pill_style)
-            for t in ["Python", "dbt", "DuckDB", "Plotly Dash", "Render", "GitHub"]
+            for t in ["Python", "dbt", "DuckDB", "Plotly Dash", "Render", "GitHub",
+                      "Tank01 API", "Basketball Reference"]
         ], style={"marginTop": "0.5rem"}),
 
         # Section 2 — Architecture
@@ -621,19 +624,20 @@ def _about_layout() -> html.Div:
         html.Div([
             _etl_card(
                 "📥", "Extract",
-                "Python script calls the Tank01 Fantasy Stats API via RapidAPI. "
-                "A single /getNBATeams request with rosters=true returns all 30 teams "
-                "and every player's per-game averages in one response — ~529 player "
-                "records. Handles API unavailability with a graceful fallback to a "
-                "built-in sample dataset so the dashboard always has data.",
+                "Two complementary sources: Tank01 Fantasy Stats API (RapidAPI) "
+                "returns all 30 team rosters with per-game averages — PPG, APG, RPG, "
+                "FG%, position, age, minutes — in a single request. BPM (Box Plus Minus) "
+                "is scraped from Basketball Reference advanced stats and committed as a "
+                "static CSV, bypassing cloud IP blocks. Falls back to a built-in sample "
+                "dataset if the API is unavailable.",
             ),
             _etl_card(
                 "⚙️", "Transform",
-                "dbt project transforms raw CSV seeds through a staging layer. "
-                "stg_players cleans column names, filters out zero-game players, "
-                "and computes derived metrics: PPG, APG, RPG, and a weighted "
-                "Impact Score. DuckDB runs in-process — no separate database "
-                "server needed. 7+ data quality tests run on every dbt execution.",
+                "dbt project transforms raw seeds through a staging layer: cleans "
+                "column names, filters zero-game players, and derives PPG, APG, RPG. "
+                "At startup, app.py merges the BPM CSV into the in-memory dataset via "
+                "normalized name matching (98.5% hit rate). Impact Score = "
+                "PPG×0.4 + APG×0.3 + RPG×0.2 + BPM×0.1. DuckDB runs in-process.",
             ),
             _etl_card(
                 "📊", "Visualize",
@@ -666,9 +670,18 @@ def _about_layout() -> html.Div:
             ], style={"marginBottom": "0.75rem", "color": "#374151", "lineHeight": "1.6"}),
             html.Li([
                 html.Strong("Graceful API fallback — "),
-                "stats.nba.com blocks non-browser traffic from cloud IPs. Tank01 "
-                "via RapidAPI solves this, with a built-in sample dataset ensuring "
-                "the dashboard always renders even if the API key is missing.",
+                "stats.nba.com and Basketball Reference both block cloud server IPs. "
+                "Tank01 via RapidAPI provides live per-game stats; BPM is scraped "
+                "locally from bball-ref and committed as a static CSV so Render never "
+                "makes that blocked request. A built-in sample dataset ensures the "
+                "dashboard always renders even without a Tank01 key.",
+            ], style={"marginBottom": "0.75rem", "color": "#374151", "lineHeight": "1.6"}),
+            html.Li([
+                html.Strong("BPM over raw +/- — "),
+                "Raw on-court +/- is team-dependent — a star on a bad team gets "
+                "punished even when playing well. Box Plus Minus (Basketball Reference) "
+                "controls for team quality and estimates individual per-100-possession "
+                "impact, making the Impact Score leaderboard far more meaningful.",
             ], style={"marginBottom": "0.75rem", "color": "#374151", "lineHeight": "1.6"}),
             html.Li([
                 html.Strong("In-memory DuckDB at startup — "),
@@ -686,14 +699,22 @@ def _about_layout() -> html.Div:
         # Section 5 — dbt Lineage
         _section_heading("dbt Model Lineage"),
         html.Pre(
-            "  raw.player_stats_raw          ← dbt seed (CSV committed to repo)\n"
+            "  Tank01 API  ──────────────────────────────────────────────────────────┐\n"
+            "  (per-game stats: PPG/APG/RPG/FG%/pos/age/min)                        │\n"
+            "         ↓                                                               │\n"
+            "  raw.player_stats_raw  ← dbt seed CSV (committed)                     │\n"
+            "         ↓                                                               │\n"
+            "  staging.stg_players   ← cleans columns, filters GP > 0               │\n"
+            "    · renames:  gp→games_played, pts/ast/reb→season totals             │\n"
+            "    · derives:  points_per_game, assists_per_game, rebounds_per_game   │\n"
+            "    · adds:     position, age, min_per_game                            │\n"
+            "         ↓                                                               │\n"
+            "  in-memory DuckDB  ←──────────────────────────────────────────────────┘\n"
+            "    + BPM merge  ← data/plus_minus_2526.csv (scraped from bball-ref,\n"
+            "                    committed; impact_score = PPG×0.4 + APG×0.3 +\n"
+            "                    RPG×0.2 + BPM×0.1, 521/529 players matched)\n"
             "         ↓\n"
-            "  staging.stg_players           ← cleans columns, filters GP > 0\n"
-            "    · renames: gp→games_played, pts/ast/reb→totals\n"
-            "    · derives: points_per_game, assists_per_game, rebounds_per_game\n"
-            "    · adds:    position, age, min_per_game, impact_score\n"
-            "         ↓\n"
-            "  Dashboard reads directly from staging (in-memory on Render)",
+            "  Plotly Dash dashboard  (Render)",
             style={
                 "background": "#1F2937", "color": "#D1FAE5",
                 "padding": "1.5rem", "borderRadius": "8px",
