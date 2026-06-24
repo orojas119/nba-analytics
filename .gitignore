@@ -69,11 +69,12 @@ target/
 dbt_packages/
 logs/
 
-# Data files
-data/*.csv
+# Data files — raw CSVs excluded; BPM file committed as static asset
 data/*.parquet
 data/*.json
 data/*.db
+data/player_stats_raw.csv
+!data/plus_minus_2526.csv
 
 # macOS
 .DS_Store

@@ -1,4 +1,6 @@
 import os
+import re
+import unicodedata
 from datetime import date as _date
 
 import duckdb
@@ -115,9 +117,41 @@ def _make_sample_df() -> pd.DataFrame:
     return df
 
 
+_PM_PATH = os.path.join(os.path.dirname(__file__), "data", "plus_minus_2526.csv")
+
+
+def _normalize_name(name: str) -> str:
+    """Strip accents, lowercase, remove Jr/Sr/II/III, collapse whitespace."""
+    name = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode("ascii")
+    name = name.lower()
+    name = re.sub(r"\b(jr\.?|sr\.?|ii|iii|iv)\b", "", name)
+    name = re.sub(r"[^\w\s]", "", name)
+    return " ".join(name.split())
+
+
+def _merge_bpm(df: pd.DataFrame) -> pd.DataFrame:
+    """Left-join BPM from the pre-fetched bball-ref CSV into df."""
+    if not os.path.exists(_PM_PATH):
+        print("BPM CSV not found — plus_minus will be 0.0 for all players.")
+        return df
+    bpm = pd.read_csv(_PM_PATH)
+    bpm = bpm.drop_duplicates("player_name_norm", keep="first")  # safety guard
+    df = df.copy()
+    df["_name_norm"] = df["player_name"].apply(_normalize_name)
+    merged = df.merge(bpm[["player_name_norm", "bpm"]], left_on="_name_norm",
+                      right_on="player_name_norm", how="left")
+    df["plus_minus"] = merged["bpm"].fillna(0.0).values
+    df.drop(columns=["_name_norm"], inplace=True)
+    matched = (merged["bpm"].notna()).sum()
+    print(f"BPM merged: {matched}/{len(df)} players matched to bball-ref data.")
+    return df
+
+
 _df = _fetch_from_api()
 if _df is None:
     _df = _make_sample_df()
+
+_df = _merge_bpm(_df)
 
 _teams = sorted(_df["team_abbreviation"].dropna().unique().tolist())
 _team_options = (
@@ -246,7 +280,7 @@ LEADERBOARD_COLS = [
     {"name": "PPG",          "id": "ppg",          "type": "numeric"},
     {"name": "APG",          "id": "apg",          "type": "numeric"},
     {"name": "RPG",          "id": "rpg",          "type": "numeric"},
-    {"name": "+/-",          "id": "plus_minus",   "type": "numeric"},
+    {"name": "BPM",          "id": "plus_minus",   "type": "numeric"},
     {"name": "Impact Score", "id": "impact_score", "type": "numeric"},
 ]
 
@@ -406,8 +440,9 @@ def _dashboard_layout() -> html.Div:
                     page_action="none",
                 ),
                 html.P(
-                    "Impact Score = PPG × 0.4 + APG × 0.3 + RPG × 0.2 + +/- × 0.1  "
-                    "· +/- shown as 0.0 (not available from Tank01 per-game data)",
+                    "Impact Score = PPG × 0.4 + APG × 0.3 + RPG × 0.2 + BPM × 0.1  "
+                    "· BPM (Box Plus Minus) from Basketball Reference — "
+                    "estimates per-100-possession impact, controlling for team quality.",
                     style={"margin": "12px 0 0", "fontSize": "0.72rem",
                            "color": "#9CA3AF", "fontStyle": "italic"},
                 ),
